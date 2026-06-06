@@ -1,7 +1,7 @@
 import pandas as pd
 from ucimlrepo import fetch_ucirepo
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 
 
 def load_german_data():
@@ -34,17 +34,25 @@ def load_australian_data():
 
 
 def _split_and_meta(X, y):
+    X_processed = X.copy()
 
-    X_processed = pd.get_dummies(X, drop_first=True)
+    le = LabelEncoder()
+
+    categorical_cols = X_processed.select_dtypes(exclude=['number']).columns
+    for col in categorical_cols:
+        X_processed[col] = le.fit_transform(X_processed[col].astype(str))
+
+    X_processed = X_processed.astype(float)
 
     X_processed = X_processed.fillna(X_processed.median())
 
-    scaler = StandardScaler()
-
     X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=0.30, random_state=42)
 
-    scaler = StandardScaler()
+    scaler = MinMaxScaler()
     X_train = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
     X_test = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
+
+    y_train = y_train.reset_index(drop=True)
+    y_test = y_test.reset_index(drop=True)
 
     return X_train, X_test, y_train, y_test
