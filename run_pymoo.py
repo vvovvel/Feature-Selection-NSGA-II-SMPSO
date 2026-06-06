@@ -18,7 +18,7 @@ from src.individual import Individual
 class CreditRiskFeatureSelection(ElementwiseProblem):
     def __init__(self, evaluator, num_features):
         super().__init__(n_var=num_features,
-                         n_obj=2,
+                         n_obj=3,
                          n_ieq_constr=0,
                          xl=0, xu=1, vtype=int)
         self.evaluator = evaluator
@@ -27,7 +27,8 @@ class CreditRiskFeatureSelection(ElementwiseProblem):
         x_bin = np.round(x).astype(int)
         ind = Individual(x_bin)
         self.evaluator.evaluate(ind)
-        out["F"] = ind.objectives
+
+        out["F"] = [ind.objectives[0], -ind.accuracy, ind.objectives[1]] #tu była też próba na ind.objectives[0] i [1] ale również nieudana.
 
 
 # --- PODGLĄD NA ŻYWO (Callback) ---
@@ -58,12 +59,18 @@ class AccuracyMonitorCallback(Callback):
 # --- KROK 3, 4 i 5: Wykonanie ---
 def main():
     print("Pobieranie i przetwarzanie zbioru danych...")
-    X_train, X_test, y_train, y_test = load_german_data()
+
+
+    X_raw_train, X_train, X_test, y_train, y_test = load_german_data()
+
     NUM_FEATURES = X_train.shape[1]
     POP_SIZE = 100
     MAX_GEN = 100
 
-    evaluator = FitnessEvaluator(X_train, y_train, classifier_type='knn')
+
+    evaluator = FitnessEvaluator(X_raw_train, X_train, y_train, classifier_type='knn')
+
+
     problem = CreditRiskFeatureSelection(evaluator, NUM_FEATURES)
 
     algorithm = NSGA2(
@@ -74,7 +81,7 @@ def main():
         eliminate_duplicates=True
     )
 
-    # Inteligentny warunek stopu — do testów (przedwczesne zatrzymanie gdy brak postępu)
+    # warunek stopu — do testów (przedwczesne zatrzymanie gdy brak postępu)
     termination = DefaultMultiObjectiveTermination(
         xtol=1e-8,
         cvtol=1e-6,

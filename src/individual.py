@@ -5,7 +5,7 @@ class Individual:
     def __init__(self, features):
         self.features = np.array(features)
         # Dwa cele: f1 = liczba cech (min), f2 = -suma IV (min, bo maksymalizujemy IV)
-        self.objectives = np.array([0.0, 0.0])
+        self.objectives = np.array([0.0, 0.0, 0.0])
 
         self.rank = None
         self.crowding_distance = 0.0

@@ -34,25 +34,23 @@ def load_australian_data():
 
 
 def _split_and_meta(X, y):
-    X_processed = X.copy()
+    X_raw = X.copy()
 
-    le = LabelEncoder()
+    X_processed = X.copy()
 
     categorical_cols = X_processed.select_dtypes(exclude=['number']).columns
     for col in categorical_cols:
-        X_processed[col] = le.fit_transform(X_processed[col].astype(str))
+        X_processed[col] = X_processed[col].astype('category').cat.codes
 
-    X_processed = X_processed.astype(float)
-
-    X_processed = X_processed.fillna(X_processed.median())
+    X_processed = X_processed.fillna(X_processed.median()).astype(float)
 
     X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=0.30, random_state=42)
 
+    X_raw_train = X_raw.iloc[X_train.index]
+
+    # 5. Skalowanie
     scaler = MinMaxScaler()
     X_train = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
     X_test = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
 
-    y_train = y_train.reset_index(drop=True)
-    y_test = y_test.reset_index(drop=True)
-
-    return X_train, X_test, y_train, y_test
+    return X_raw_train, X_train, X_test, y_train, y_test

@@ -5,9 +5,13 @@ from sklearn.neural_network import MLPClassifier
 import numpy as np
 import pandas as pd
 
-
 class FitnessEvaluator:
-    def __init__(self, X_train, y_train, classifier_type='knn'):
+    def __init__(self, X_raw, X_train, y_train, classifier_type='knn'):
+        """
+        X_raw: surowe dane przed skalowaniem i kodowaniem (do IV)
+        X_train: przetworzone dane po MinMaxScaler i LabelEncoder (do KNN/SVM/ANN)
+        """
+        self.X_raw = X_raw
         self.X_train = X_train
         self.classifier_type = classifier_type.lower()
         self.accuracy_cache = {}
@@ -23,15 +27,15 @@ class FitnessEvaluator:
 
     def _calculate_all_iv(self):
         iv_list = []
-        for col in self.X_train.columns:
-            unique_vals = self.X_train[col].nunique()
+        # IV liczymy wyłącznie na surowych danych (self.X_raw)
+        for col in self.X_raw.columns:
+            unique_vals = self.X_raw[col].nunique()
 
             if unique_vals <= 10:
-                binned_vals = self.X_train[col]
+                binned_vals = self.X_raw[col]
             else:
-                binned_vals = pd.qcut(self.X_train[col], q=10, duplicates='drop')
+                binned_vals = pd.qcut(self.X_raw[col], q=10, duplicates='drop')
 
-            # Użycie .values zapobiega błędom wyrównania indeksów
             df = pd.DataFrame({
                 'val': binned_vals.values,
                 'target': self.y_train.values
@@ -43,37 +47,33 @@ class FitnessEvaluator:
             stats['good_dist'] = stats['good'] / self.total_good
             stats['bad_dist'] = stats['bad'] / self.total_bad
 
-            # Metoda wygładzania (epsilon) zapobiegająca log(0) i dzieleniu przez 0
             epsilon = 1e-6
             stats['good_dist'] = np.maximum(stats['good_dist'], epsilon)
             stats['bad_dist'] = np.maximum(stats['bad_dist'], epsilon)
 
-            # Liczymy IV dla wszystkich koszyków bez odrzucania jakichkolwiek wartości
             woe = np.log(stats['good_dist'] / stats['bad_dist'])
             iv = (stats['good_dist'] - stats['bad_dist']) * woe
-
             iv_list.append(float(iv.sum()))
 
         return np.array(iv_list)
 
     def evaluate(self, individual):
         mask = individual.features == 1
-        num_features = int(np.sum(mask))
+        num_features = np.sum(mask)
+        total_iv = np.sum(self.iv_scores[mask])
+
+        individual.objectives = np.array([float(num_features), float(total_iv)])
 
         if num_features == 0:
-            individual.objectives = np.array([float(len(individual.features)), -0.0])
             individual.accuracy = 0.0
             return
 
-        total_iv = np.sum(self.iv_scores[mask])
-        individual.objectives = np.array([float(num_features), -total_iv])
-
-        # Sprawdzenie cache przed kosztowną ewaluacją
         cache_key = tuple(individual.features)
         if cache_key in self.accuracy_cache:
             individual.accuracy = self.accuracy_cache[cache_key]
             return
 
+        # 2. Wrapper: KNN/SVM/ANN pracuje na przetworzonych danych (self.X_train)
         X_subset = self.X_train.iloc[:, mask]
 
         if self.classifier_type == 'knn':
@@ -88,8 +88,7 @@ class FitnessEvaluator:
                                   solver='sgd', random_state=42)
             cv_folds = 10
         else:
-            raise ValueError(
-                f"Nieznany classifier_type: '{self.classifier_type}'. Dostępne: 'knn', 'svm', 'ann'.")
+            raise ValueError(f"Nieznany classifier: '{self.classifier_type}'")
 
         scores = cross_val_score(model, X_subset, self.y_train, cv=cv_folds, scoring='accuracy')
         individual.accuracy = scores.mean()
