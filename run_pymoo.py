@@ -2,23 +2,24 @@ import numpy as np
 from pymoo.core.problem import ElementwiseProblem
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.crossover.pntx import PointCrossover
-from pymoo.operators.mutation.bitflip import BitflipMutation
+from pymoo.operators.mutation.pm import PolynomialMutation
 from pymoo.operators.sampling.rnd import BinaryRandomSampling
 from pymoo.optimize import minimize
 from pymoo.termination.default import DefaultMultiObjectiveTermination
-from pymoo.core.callback import Callback
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import cross_val_score
+from sklearn.metrics import f1_score
+import pandas as pd
 
 from src.data_loader import load_german_data
 from src.fitness import FitnessEvaluator
 from src.individual import Individual
 
 
-# --- KROK 1 i 2: Definicja problemu ---
 class CreditRiskFeatureSelection(ElementwiseProblem):
     def __init__(self, evaluator, num_features):
         super().__init__(n_var=num_features,
-                         n_obj=3,
+                         n_obj=2,
                          n_ieq_constr=0,
                          xl=0, xu=1, vtype=int)
         self.evaluator = evaluator
@@ -28,114 +29,96 @@ class CreditRiskFeatureSelection(ElementwiseProblem):
         ind = Individual(x_bin)
         self.evaluator.evaluate(ind)
 
-        out["F"] = [ind.objectives[0], -ind.accuracy, ind.objectives[1]] #tu była też próba na ind.objectives[0] i [1] ale również nieudana.
+        out["F"] = [ind.objectives[0], -ind.objectives[1]]
 
 
-# --- PODGLĄD NA ŻYWO (Callback) ---
-class AccuracyMonitorCallback(Callback):
-    def __init__(self, evaluator):
-        super().__init__()
-        self.evaluator = evaluator
-
-    def notify(self, algorithm):
-        X = algorithm.opt.get("X")
-        if X is not None and len(X) > 0:
-            mid_idx = len(X) // 2
-            x_sample = np.round(X[mid_idx]).astype(int)
-            cache_key = tuple(x_sample)
-            cached_acc = self.evaluator.accuracy_cache.get(cache_key, None)
-
-            nf = int(np.sum(x_sample))
-            if cached_acc is not None:
-                print(
-                    f" ---> [Gen {algorithm.n_gen}] Front: {len(X)} rozwiązań | "
-                    f"Próbka: {nf} cech, Accuracy = {cached_acc:.4f}")
-            else:
-                print(
-                    f" ---> [Gen {algorithm.n_gen}] Front: {len(X)} rozwiązań | "
-                    f"Próbka: {nf} cech, Accuracy = (brak w cache)")
-
-
-# --- KROK 3, 4 i 5: Wykonanie ---
 def main():
     print("Pobieranie i przetwarzanie zbioru danych...")
-
-
     X_raw_train, X_train, X_test, y_train, y_test = load_german_data()
-
     NUM_FEATURES = X_train.shape[1]
-    POP_SIZE = 100
-    MAX_GEN = 100
 
+    POP_SIZE = 100
+    MAX_GEN = 500
+    NUM_RUNS = 30
+    results_summary = []
 
     evaluator = FitnessEvaluator(X_raw_train, X_train, y_train, classifier_type='knn')
-
-
     problem = CreditRiskFeatureSelection(evaluator, NUM_FEATURES)
 
-    algorithm = NSGA2(
-        pop_size=POP_SIZE,
-        sampling=BinaryRandomSampling(),
-        crossover=PointCrossover(n_points=1, prob=0.9),
-        mutation=BitflipMutation(prob=0.1),
-        eliminate_duplicates=True
-    )
+    for run in range(NUM_RUNS):
+        seed = run + 42
+        print(f"\n--- Uruchomienie {run + 1}/{NUM_RUNS} (seed={seed}) ---")
 
-    # warunek stopu — do testów (przedwczesne zatrzymanie gdy brak postępu)
-    termination = DefaultMultiObjectiveTermination(
-        xtol=1e-8,
-        cvtol=1e-6,
-        ftol=0.0025,
-        period=10,
-        n_max_gen=MAX_GEN
-    )
+        algorithm = NSGA2(
+            pop_size=POP_SIZE,
+            sampling=BinaryRandomSampling(),
+            crossover=PointCrossover(n_points=1, prob=0.9),
+            mutation=PolynomialMutation(prob=1.0),
+            eliminate_duplicates=True
+        )
 
-    monitor = AccuracyMonitorCallback(evaluator)
+        termination = DefaultMultiObjectiveTermination(
+            xtol=1e-8, cvtol=1e-6, ftol=0.0025, period=10, n_max_gen=MAX_GEN
+        )
 
-    print("NSGA-II: Rozpoczęcie optymalizacji przez pymoo...")
-    res = minimize(
-        problem,
-        algorithm,
-        termination=termination,
-        callback=monitor,
-        seed=1,
-        verbose=True
-    )
+        res = minimize(problem, algorithm, termination=termination, seed=seed, verbose=False)
 
-    print("\n--- Optymalizacja zakończona ---")
+        if res.X is None:
+            continue
 
-    if res.X is None:
-        print("BŁĄD: Algorytm nie znalazł żadnych rozwiązań.")
-        return
+        run_solutions = []
+        for x in res.X:
+            x_bin = np.round(x).astype(int)
+            mask = x_bin == 1
+            if np.sum(mask) == 0: continue
 
-    print("Obliczanie Accuracy dla wszystkich rozwiązań z ostatecznego frontu Pareto...")
+            ind = Individual(x_bin)
+            evaluator.evaluate(ind)
 
-    best_solutions = []
-    for x in res.X:
-        ind = Individual(np.round(x).astype(int))
-        evaluator.evaluate(ind)
-        best_solutions.append(ind)
+            model = KNeighborsClassifier(n_neighbors=5, p=1, weights='uniform')
+            cv_scores = cross_val_score(model, X_train.iloc[:, mask], y_train, cv=10, scoring='accuracy')
+            ind.accuracy = cv_scores.mean()
+            run_solutions.append(ind)
 
-    sorted_front = sorted(best_solutions, key=lambda ind: ind.accuracy, reverse=True)
+        best_run_ind = max(run_solutions, key=lambda ind: ind.accuracy)
+        best_mask = best_run_ind.features == 1
 
-    print("\nNajlepsze rozwiązania NSGA-II (posortowane po accuracy CV):")
-    for i, ind in enumerate(sorted_front[:5]):
-        nf = ind.objectives[0]
-        iv = -ind.objectives[1]
-        print(f" Rozwiązanie {i + 1}: Accuracy CV = {ind.accuracy:.4f}, "
-              f"IV = {iv:.4f}, Liczba cech = {int(nf)}")
+        final_model = KNeighborsClassifier(n_neighbors=5, p=1, weights='uniform')
+        final_model.fit(X_train.iloc[:, best_mask], y_train)
+        test_acc = final_model.score(X_test.iloc[:, best_mask], y_test)
+        test_f1 = f1_score(y_test, final_model.predict(X_test.iloc[:, best_mask]))
 
-    # Ewaluacja najlepszego rozwiązania na zbiorze testowym
-    print("\nEwaluacja najlepszego rozwiązania na zbiorze testowym:")
-    best_ind = sorted_front[0]
-    best_mask = best_ind.features == 1
+        results_summary.append({
+            'run': run + 1,
+            'train_acc_cv': best_run_ind.accuracy,
+            'test_acc': test_acc,
+            'test_f1': test_f1,
+            'num_features': int(best_run_ind.objectives[0]),
+            'mask': best_mask,
+            'iv_sum': best_run_ind.objectives[1]
+        })
 
-    model = KNeighborsClassifier(n_neighbors=5, p=1, weights='uniform')
-    model.fit(X_train.iloc[:, best_mask], y_train)
-    test_accuracy = model.score(X_test.iloc[:, best_mask], y_test)
-    print(f" Test Accuracy = {test_accuracy:.4f} | "
-          f"Liczba cech = {int(best_ind.objectives[0])} | "
-          f"IV = {-best_ind.objectives[1]:.4f}")
+    df = pd.DataFrame(results_summary)
+    print("\n" + "=" * 30)
+    print(f"WYNIKI ZBIORCZE ({NUM_RUNS} uruchomień)")
+    print("=" * 30)
+    print(df.describe().loc[['mean', 'std', 'min', 'max']])
+
+    # --- PODSUMOWANIE NAJLEPSZEGO MODELU ---
+    best_idx = df['test_acc'].idxmax()
+    best_row = df.loc[best_idx]
+
+    print("\n" + "=" * 30)
+    print("NAJLEPSZY MODEL (WG TEST_ACC)")
+    print("=" * 30)
+    print(f"Uruchomienie nr: {int(best_row['run'])}")
+    print(f"Test Accuracy:   {best_row['test_acc']:.4f}")
+    print(f"Test F1-Score:   {best_row['test_f1']:.4f}")
+    print(f"Liczba cech:     {int(best_row['num_features'])}")
+    print(f"Suma IV:         {best_row['iv_sum']:.4f}")
+
+    selected_features = X_train.columns[best_row['mask']].tolist()
+    print(f"Wybrane cechy:   {selected_features}")
 
 
 if __name__ == "__main__":

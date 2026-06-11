@@ -1,9 +1,6 @@
-from sklearn.model_selection import cross_val_score
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
-from sklearn.neural_network import MLPClassifier
 import numpy as np
 import pandas as pd
+
 
 class FitnessEvaluator:
     def __init__(self, X_raw, X_train, y_train, classifier_type='knn'):
@@ -14,7 +11,6 @@ class FitnessEvaluator:
         self.X_raw = X_raw
         self.X_train = X_train
         self.classifier_type = classifier_type.lower()
-        self.accuracy_cache = {}
 
         if hasattr(y_train, 'iloc'):
             self.y_train = y_train.iloc[:, 0] if len(y_train.shape) > 1 else y_train
@@ -27,69 +23,55 @@ class FitnessEvaluator:
 
     def _calculate_all_iv(self):
         iv_list = []
-        # IV liczymy wyłącznie na surowych danych (self.X_raw)
         for col in self.X_raw.columns:
-            unique_vals = self.X_raw[col].nunique()
+            unique_vals = self.X_raw[
+                col].nunique()  # Liczy liczbę unikalnych wartości w danej kolumnie, aby zdecydować o sposobie binningu
 
-            if unique_vals <= 10:
+            if unique_vals <= 15:  # Jeśli cecha ma mało unikalnych wartości, nie wymaga grupowania
                 binned_vals = self.X_raw[col]
-            else:
-                binned_vals = pd.qcut(self.X_raw[col], q=10, duplicates='drop')
+            else:  # Jeśli cecha jest ciągła, dzielimy ją na 15 buckets
+                binned_vals = pd.qcut(self.X_raw[col], q=15,
+                                      duplicates='drop')  # Dzieli dane na 15 kawalkow, kazda zmienna jest zastapiona numerem swojego bucketa
 
-            df = pd.DataFrame({
-                'val': binned_vals.values,
-                'target': self.y_train.values
+            df = pd.DataFrame({  # Tworzy tymczasową ramkę danych do obliczeń
+                'val': binned_vals.values,  # Wartości (lub przypisane kubełki)
+                'target': self.y_train.values  # Odpowiadające im etykiety celu (0 lub 1)
             })
 
-            stats = df.groupby('val', observed=False)['target'].agg(['count', 'sum'])
-            stats.columns = ['count', 'good']
-            stats['bad'] = stats['count'] - stats['good']
-            stats['good_dist'] = stats['good'] / self.total_good
-            stats['bad_dist'] = stats['bad'] / self.total_bad
+            stats = df.groupby('val', observed=False)['target'].agg(['count',
+                                                                     'sum']) #całkowita suma wartości w obrębie bucketa
+            stats.columns = ['count', 'good']  # Nazywa kolumny statystyk
+            stats['bad'] = stats['count'] - stats['good']  # Oblicza liczbę "złych" przypadków (pozostałe)
+            stats['good_dist'] = stats[
+                                     'good'] / self.total_good  # Oblicza udział "dobrych" w danym kubełku względem wszystkich "dobrych"
+            stats['bad_dist'] = stats[
+                                    'bad'] / self.total_bad
 
-            epsilon = 1e-6
-            stats['good_dist'] = np.maximum(stats['good_dist'], epsilon)
+            epsilon = 1e-6  #eps dla stabilności numerycznej
+            stats['good_dist'] = np.maximum(stats['good_dist'],
+                                            epsilon)  #unikamy dzielenia przez zero
             stats['bad_dist'] = np.maximum(stats['bad_dist'], epsilon)
 
-            woe = np.log(stats['good_dist'] / stats['bad_dist'])
-            iv = (stats['good_dist'] - stats['bad_dist']) * woe
-            iv_list.append(float(iv.sum()))
+            woe = np.log(stats['good_dist'] / stats[
+                'bad_dist'])  #WoE wzór
+            iv = (stats['good_dist'] - stats['bad_dist']) * woe  # IV wzór
+            iv_list.append(float(iv.sum()))  # sumuje iv dla wszystkich bucketów w tej cesze i dodaje je do listy
 
-        return np.array(iv_list)
+        return np.array(iv_list)  # zwraca tablice IV dla wszystkich cech po kolei
 
     def evaluate(self, individual):
+        """
+        Ocena osobnika na podstawie dwóch funkcji celu:
+        1. Liczba wybranych cech (minimalizacja).
+        2. Sumaryczna wartość IV (maksymalizacja).
+        """
         mask = individual.features == 1
         num_features = np.sum(mask)
-        total_iv = np.sum(self.iv_scores[mask])
+
+        # Jeśli nie wybrano żadnej cechy, total_iv przyjmuje 0.0
+        if num_features == 0:
+            total_iv = 0.0
+        else:
+            total_iv = np.sum(self.iv_scores[mask])
 
         individual.objectives = np.array([float(num_features), float(total_iv)])
-
-        if num_features == 0:
-            individual.accuracy = 0.0
-            return
-
-        cache_key = tuple(individual.features)
-        if cache_key in self.accuracy_cache:
-            individual.accuracy = self.accuracy_cache[cache_key]
-            return
-
-        # 2. Wrapper: KNN/SVM/ANN pracuje na przetworzonych danych (self.X_train)
-        X_subset = self.X_train.iloc[:, mask]
-
-        if self.classifier_type == 'knn':
-            model = KNeighborsClassifier(n_neighbors=5, p=1, weights='uniform')
-            cv_folds = 5
-        elif self.classifier_type == 'svm':
-            model = SVC(kernel='rbf', C=1.0, gamma=0.1, class_weight='balanced', random_state=42)
-            cv_folds = 10
-        elif self.classifier_type == 'ann':
-            model = MLPClassifier(hidden_layer_sizes=(100,), max_iter=20,
-                                  learning_rate_init=0.5, momentum=0.3,
-                                  solver='sgd', random_state=42)
-            cv_folds = 10
-        else:
-            raise ValueError(f"Nieznany classifier: '{self.classifier_type}'")
-
-        scores = cross_val_score(model, X_subset, self.y_train, cv=cv_folds, scoring='accuracy')
-        individual.accuracy = scores.mean()
-        self.accuracy_cache[cache_key] = individual.accuracy
